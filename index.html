@@ -579,14 +579,19 @@ const STICKERS = ['🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷'
 const PRAISE = ['Bravissima!', 'Perfetto!', 'Evviva!', 'Fantastico!', 'Che brava!', 'Super!', 'Grande!', 'Esatto!'];
 const RETRY = ['Quasi! Riprova', 'Ci sei quasi!', 'Riprova, ce la fai!', 'Ancora un tentativo!'];
 'use strict';
-/* ===== AUDIO: musica generata, effetti, voce ===== */
+/* ===== AUDIO: musica generata (morbida, con riverbero), effetti, voce ===== */
 const Aud = (() => {
-  let ctx = null, master, mus, sfx, noiseBuf, timer = null;
+  let ctx = null, master, mus, sfx, ana = null, timer = null;
   const st = { music: true, sfx: true, mood: 'map', key: 0, bar: 0, step: 0, next: 0, A: null, B: null, running: false, duck: 1 };
   const SCALE = [0, 2, 4, 7, 9];
-  const CHORDS = [[0, 4, 7], [9, 0, 4], [5, 9, 0], [7, 11, 2]];
+  const CHORDS = [[0, 4, 7], [5, 9, 0], [9, 0, 4], [7, 11, 2]];
   const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
 
+  function makeIR(sec, decay) {
+    const len = Math.floor(ctx.sampleRate * sec), b = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay); }
+    return b;
+  }
   function init() {
     if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -595,11 +600,14 @@ const Aud = (() => {
       ctx = new AC();
       master = ctx.createGain(); master.gain.value = 0.9;
       const comp = ctx.createDynamicsCompressor();
-      master.connect(comp); comp.connect(ctx.destination);
-      mus = ctx.createGain(); mus.gain.value = st.music ? 1 : 0; mus.connect(master);
+      ana = ctx.createAnalyser(); ana.fftSize = 2048;
+      master.connect(comp); comp.connect(ana); ana.connect(ctx.destination);
+      const conv = ctx.createConvolver(); conv.buffer = makeIR(2.8, 2.6);
+      const wet = ctx.createGain(); wet.gain.value = 0.9; conv.connect(wet); wet.connect(master);
+      mus = ctx.createGain(); mus.gain.value = st.music ? st.duck : 0; mus.connect(master);
+      const ms = ctx.createGain(); ms.gain.value = 0.7; mus.connect(ms); ms.connect(conv);
       sfx = ctx.createGain(); sfx.gain.value = st.sfx ? 1 : 0; sfx.connect(master);
-      noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.5, ctx.sampleRate);
-      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      const ss = ctx.createGain(); ss.gain.value = 0.22; sfx.connect(ss); ss.connect(conv);
       if (ctx.state === 'suspended') ctx.resume();
     } catch (e) { ctx = null; }
   }
@@ -616,18 +624,25 @@ const Aud = (() => {
     osc.connect(g); g.connect(o.dest || sfx);
     osc.start(t); osc.stop(t + d + 0.05);
   }
-  function pluck(f, t, d, v) {
-    tone(f, t, d, { type: 'sine', vol: v, dest: mus });
-    tone(f * 4, t, d * 0.3, { type: 'sine', vol: v * 0.22, dest: mus });
+  /* campanello / carillon: fondamentale + parziali inarmoniche, decadimento naturale */
+  function bell(f, t, d, v, dest) {
+    tone(f, t, d, { vol: v, a: 0.004, dest });
+    tone(f * 2.756, t, d * 0.28, { vol: v * 0.2, a: 0.003, dest });
+    tone(f * 5.4, t, d * 0.1, { vol: v * 0.07, a: 0.002, dest });
   }
-  function shaker(t, v) {
-    const s = ctx.createBufferSource(), g = ctx.createGain(), f = ctx.createBiquadFilter();
-    s.buffer = noiseBuf; f.type = 'highpass'; f.frequency.value = 6500;
-    g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
-    s.connect(f); f.connect(g); g.connect(mus); s.start(t); s.stop(t + 0.08);
-  }
-  function kick(t, v) {
-    tone(120, t, 0.16, { type: 'sine', vol: v, slide: 45, dest: mus });
+  /* pad caldo: due onde a dente di sega leggermente scordate, filtrate */
+  function pad(notes, t, dur, v) {
+    notes.forEach(n => [-7, 7].forEach(det => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+      o.type = 'sawtooth'; o.frequency.value = mtof(n); o.detune.value = det;
+      f.type = 'lowpass'; f.frequency.value = 620; f.Q.value = 0.3;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(v, t + dur * 0.4);
+      g.gain.linearRampToValueAtTime(v * 0.75, t + dur * 0.85);
+      g.gain.linearRampToValueAtTime(0.0001, t + dur + 1.1);
+      o.connect(f); f.connect(g); g.connect(mus);
+      o.start(t); o.stop(t + dur + 1.2);
+    }));
   }
 
   function idxNote(i, base) { return base + 12 * Math.floor(i / 5) + SCALE[((i % 5) + 5) % 5]; }
@@ -636,13 +651,10 @@ const Aud = (() => {
     let i = 5 + rnd(4);
     for (let s = 0; s < 8; s++) {
       const strong = s % 4 === 0;
-      if (!strong && Math.random() < 0.4) { m.push(null); continue; }
-      i = Math.max(3, Math.min(12, i + pick([-2, -1, -1, 0, 1, 1, 2])));
+      if (Math.random() < (strong ? 0.15 : 0.62)) { m.push(null); continue; }
+      i = Math.max(3, Math.min(11, i + pick([-2, -1, -1, 0, 1, 1, 2])));
       if (strong) {
-        for (const off of [0, 1, -1, 2, -2]) {
-          const n = idxNote(i + off, 0) % 12;
-          if (chord.includes(n)) { i += off; break; }
-        }
+        for (const off of [0, 1, -1, 2, -2]) { if (chord.includes(idxNote(i + off, 0) % 12)) { i += off; break; } }
       }
       m.push(i);
     }
@@ -651,23 +663,21 @@ const Aud = (() => {
 
   function scheduleStep(t) {
     const play = st.mood === 'play';
-    const bpm = play ? 112 : 98;
+    const bpm = play ? 72 : 80;
     const eighth = 60 / bpm / 2;
     const ch = CHORDS[st.bar % 4];
     const base = 60 + st.key;
     const s = st.step;
-    if (s === 0 || s === 4) pluck(mtof(base - 24 + ch[0]), t, eighth * 3.2, play ? 0.16 : 0.2);
-    const pat = [0, 1, 2, 1, 0, 1, 2, 1][s];
-    pluck(mtof(base - 12 + ch[pat] + (ch[pat] < ch[0] ? 12 : 0)), t, eighth * 1.6, play ? 0.05 : 0.07);
+    if (s === 0) {
+      pad(ch.map(c => base - 12 + c + (c > 6 ? -12 : 0)), t, eighth * 8, play ? 0.012 : 0.016);
+      tone(mtof(base - 24 + ch[0]), t, eighth * 6, { vol: play ? 0.09 : 0.12, a: 0.04, dest: mus });
+    }
+    if (s === 4) tone(mtof(base - 24 + ch[0] + 7), t, eighth * 3, { vol: 0.045, a: 0.04, dest: mus });
     if (st.bar % 16 === 0 && s === 0) { st.A = makeBar(CHORDS[0]); st.B = makeBar(CHORDS[2]); }
     const bars = [st.A, st.A, st.B, st.A];
     const mel = bars[st.bar % 4][s];
-    if (mel != null && st.A) {
-      const f = mtof(idxNote(mel, base));
-      tone(f, t, eighth * 1.7, { type: 'triangle', vol: play ? 0.06 : 0.1, a: 0.01, dest: mus });
-    }
-    if (!play) { if (s % 2 === 1) shaker(t, 0.03); if (s === 0 || s === 4) kick(t, 0.12); }
-    else if (s % 4 === 2) shaker(t, 0.02);
+    if (mel != null && st.A) bell(mtof(idxNote(mel, base)), t, eighth * 5, play ? 0.055 : 0.08, mus);
+    if (s === 6 && st.bar % 4 === 3 && Math.random() < 0.5) bell(mtof(idxNote(12 + rnd(3), base)), t, eighth * 6, 0.03, mus);
     st.step++;
     if (st.step >= 8) { st.step = 0; st.bar++; }
     return eighth;
@@ -676,7 +686,7 @@ const Aud = (() => {
   function tick() {
     if (!ctx || !st.running) return;
     if (st.next < ctx.currentTime) st.next = ctx.currentTime + 0.05;
-    while (st.next < ctx.currentTime + 0.3) { st.next += scheduleStep(st.next); }
+    while (st.next < ctx.currentTime + 0.35) { st.next += scheduleStep(st.next); }
   }
   function start() {
     init();
@@ -693,13 +703,14 @@ const Aud = (() => {
     setSfx(on) { st.sfx = on; if (sfx) sfx.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.02); },
     duck(on) { st.duck = on ? 0.3 : 1; if (mus && st.music) mus.gain.setTargetAtTime(st.duck, ctx.currentTime, 0.1); },
     visible(v) { if (!ctx) return; if (v) { ctx.resume(); } else { ctx.suspend(); } },
-    pop(n) { if (!ctx) return; const t = ctx.currentTime; tone(mtof(72 + (n || 0) * 2), t, 0.18, { type: 'sine', vol: 0.22, slide: mtof(78 + (n || 0) * 2) }); },
-    good() { if (!ctx) return; const t = ctx.currentTime; [72, 76, 79, 84].forEach((n, i) => tone(mtof(n), t + i * 0.07, 0.35, { type: 'triangle', vol: 0.2 })); },
-    oops() { if (!ctx) return; const t = ctx.currentTime; tone(mtof(64), t, 0.22, { vol: 0.16 }); tone(mtof(60), t + 0.14, 0.3, { vol: 0.14 }); },
-    bubble() { if (!ctx) return; const t = ctx.currentTime; tone(520, t, 0.14, { vol: 0.2, slide: 1100 }); },
-    star(i) { if (!ctx) return; const t = ctx.currentTime; tone(mtof(79 + (i || 0) * 4), t, 0.5, { type: 'triangle', vol: 0.22 }); tone(mtof(91 + (i || 0) * 4), t + 0.05, 0.4, { vol: 0.08 }); },
-    win() { if (!ctx) return; const t = ctx.currentTime; [[67, 0], [72, 0.14], [76, 0.28], [79, 0.42], [84, 0.62], [79, 0.82], [84, 1.0]].forEach(([n, d]) => { tone(mtof(n), t + d, 0.4, { type: 'triangle', vol: 0.22 }); tone(mtof(n - 12), t + d, 0.4, { vol: 0.1 }); }); },
-    sticker() { if (!ctx) return; const t = ctx.currentTime; for (let i = 0; i < 9; i++) tone(mtof(72 + i * 2 + (i > 4 ? 1 : 0)), t + i * 0.06, 0.4, { type: 'sine', vol: 0.14 }); }
+    peak() { if (!ana) return 0; const d = new Float32Array(ana.fftSize); ana.getFloatTimeDomainData(d); let p = 0; for (const x of d) p = Math.max(p, Math.abs(x)); return p; },
+    pop(n) { if (!ctx) return; const t = ctx.currentTime; tone(mtof(72 + (n || 0) * 2), t, 0.16, { vol: 0.16, a: 0.006, slide: mtof(74 + (n || 0) * 2) }); },
+    good() { if (!ctx) return; const t = ctx.currentTime; [72, 76, 79, 84].forEach((n, i) => bell(mtof(n), t + i * 0.08, 0.7, 0.16)); },
+    oops() { if (!ctx) return; const t = ctx.currentTime; tone(mtof(62), t, 0.28, { vol: 0.1, a: 0.02 }); tone(mtof(58), t + 0.15, 0.35, { vol: 0.09, a: 0.02 }); },
+    bubble() { if (!ctx) return; const t = ctx.currentTime; tone(520, t, 0.12, { vol: 0.14, slide: 1000 }); },
+    star(i) { if (!ctx) return; const t = ctx.currentTime; bell(mtof(79 + (i || 0) * 4), t, 1.0, 0.16); },
+    win() { if (!ctx) return; const t = ctx.currentTime; [[67, 0], [72, 0.16], [76, 0.32], [79, 0.48], [84, 0.7], [79, 0.95], [84, 1.15]].forEach(([n, d]) => { bell(mtof(n), t + d, 1.1, 0.16); tone(mtof(n - 12), t + d, 0.6, { vol: 0.05, a: 0.02 }); }); },
+    sticker() { if (!ctx) return; const t = ctx.currentTime; for (let i = 0; i < 8; i++) bell(mtof(76 + i * 2 + (i > 4 ? 1 : 0)), t + i * 0.07, 0.7, 0.1); }
   };
   return api;
 })();
@@ -707,21 +718,28 @@ const Aud = (() => {
 /* ---------- Voce (sintesi vocale italiana del dispositivo) ---------- */
 const Voice = (() => {
   const ss = window.speechSynthesis;
-  let voice = null, on = true, gen = 0;
+  let voice = null, on = true, gen = 0, unlocked = false;
+  function score(v) {
+    const id = (v.voiceURI + ' ' + v.name).toLowerCase();
+    let s = 0;
+    if (/premium/.test(id)) s += 40;
+    if (/enhanced|avanzata|migliorata/.test(id)) s += 30;
+    if (/siri/.test(id)) s += 28;
+    if (/natural|neural|online/.test(id)) s += 35;
+    if (/compact/.test(id)) s -= 20;
+    ['Alice', 'Federica', 'Paola', 'Elsa', 'Isabella', 'Google italiano', 'Luca'].forEach((n, i) => { if (id.includes(n.toLowerCase())) s += 12 - i; });
+    if (v.localService === false && !/online|natural|neural|google/.test(id)) s -= 2;
+    return s;
+  }
   function load() {
     if (!ss) return;
-    const vs = ss.getVoices() || [];
-    const it = vs.filter(v => /^it/i.test(v.lang.replace('_', '-')));
-    if (!it.length) { voice = null; return; }
-    const pref = ['Alice', 'Federica', 'Elsa', 'Isabella', 'Paola', 'Luca', 'Google italiano'];
-    voice = null;
-    for (const n of pref) { const f = it.find(v => v.name.includes(n)); if (f) { voice = f; break; } }
-    if (!voice) voice = it.find(v => /enhanced|premium|natural/i.test(v.name)) || it[0];
+    const it = (ss.getVoices() || []).filter(v => /^it/i.test((v.lang || '').replace('_', '-')));
+    voice = it.length ? it.slice().sort((a, b) => score(b) - score(a))[0] : null;
   }
   if (ss) { load(); if (ss.addEventListener) ss.addEventListener('voiceschanged', load); else ss.onvoiceschanged = load; }
-  let unlocked = false;
   return {
     available: !!ss,
+    name() { load(); return voice ? voice.name : ''; },
     unlock() { if (!ss || unlocked) return; unlocked = true; try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; ss.speak(u); } catch (e) { } },
     setOn(v) { on = v; if (!v) this.stop(); },
     stop() { gen++; try { ss && ss.cancel(); } catch (e) { } Aud.duck(false); },
@@ -735,7 +753,7 @@ const Voice = (() => {
           if (my !== gen) { res(); return; }
           const u = new SpeechSynthesisUtterance(String(text).toLowerCase());
           u.lang = 'it-IT'; if (voice) u.voice = voice;
-          u.rate = o.rate || 0.82; u.pitch = o.pitch || 1.12; u.volume = 1;
+          u.rate = o.rate || 0.86; u.pitch = o.pitch || 1.0; u.volume = 1;
           let done = false;
           const fin = () => { if (done) return; done = true; if (my === gen) Aud.duck(false); res(); };
           u.onstart = () => Aud.duck(true);
@@ -911,7 +929,7 @@ function startReview() {
 function renderAct() {
   cleanup(); App.view = 'play';
   const P = App.play, a = P.acts[P.i];
-  setHud(`<button class="rbtn" id="bBack" aria-label="Torna alla mappa">${I.back}</button><div class="pips">${P.acts.map((_, i) => `<span class="pip${i < P.i ? ' done' : i === P.i ? ' now' : ''}"></span>`).join('')}</div>${starBox()}`);
+  setHud(`<button class="rbtn" id="bBack" aria-label="Torna alla mappa">${I.back}</button><div class="pips">${P.acts.map((_, i) => `<span class="pip${i < P.i ? ' done' : i === P.i ? ' now' : ''}"></span>`).join('')}</div>${toggles()}`);
   $('#bBack').onclick = () => { Voice.stop(); screenMap(); };
   const s = $('#screen'); s.innerHTML = '';
   const wrap = el('section', 'act');
@@ -1020,7 +1038,7 @@ function parentPanel() {
   <div class="line"><span>Voce</span><button class="pill" id="pVoc">${SAVE.voice ? 'Accesa' : 'Spenta'}</button></div>
   <div class="line"><span>Effetti sonori</span><button class="pill" id="pSfx">${SAVE.sfx ? 'Accesi' : 'Spenti'}</button></div>
   <div class="line"><span>Tutti i livelli aperti</span><button class="pill" id="pUnl">${SAVE.unlocked ? 'Sì' : 'No'}</button></div>
-  <div class="small">${Voice.available ? 'La voce è quella italiana del dispositivo: se suona poco naturale, in Impostazioni di iPad si può scaricare una voce italiana migliorata (Accessibilità, Contenuto letto).' : 'Questo dispositivo non ha la sintesi vocale: il gioco funziona lo stesso, ma senza voce.'}</div>
+  ${Voice.available ? `<div class="line"><span>Voce in uso: <b>${Voice.name() || 'predefinita'}</b></span><button class="pill" id="pTest">Prova la voce</button></div><div class="small">Per una voce più naturale: su iPad, Impostazioni, Accessibilità, Contenuto letto, Voci, Italiano. Scarica una voce Premium o Avanzata (per esempio Alice o Federica), poi riapri il gioco.</div>` : '<div class="small">Questo dispositivo non ha la sintesi vocale: il gioco funziona lo stesso, ma senza voce.</div>'}
   <div class="line"><button class="pill danger" id="pReset">Azzera i progressi</button><button class="cta grape" id="pClose" style="min-height:52px;font-size:22px;padding:8px 26px 6px">Chiudi</button></div>`;
   document.body.appendChild(m);
   const rer = () => { m.remove(); parentPanel(); };
@@ -1028,6 +1046,7 @@ function parentPanel() {
   $('#pMus', c).onclick = () => { SAVE.music = !SAVE.music; Aud.init(); Aud.setMusic(SAVE.music); if (SAVE.music) Aud.start(); save(); rer(); };
   $('#pVoc', c).onclick = () => { SAVE.voice = !SAVE.voice; Voice.setOn(SAVE.voice); save(); rer(); };
   $('#pSfx', c).onclick = () => { SAVE.sfx = !SAVE.sfx; Aud.init(); Aud.setSfx(SAVE.sfx); save(); rer(); };
+  const pt = $('#pTest', c); if (pt) pt.onclick = () => { Aud.init(); Voice.unlock(); Voice.say('Ciao ' + NAME + '! Sono la voce del gioco. Come mi trovi?'); };
   $('#pUnl', c).onclick = () => { SAVE.unlocked = !SAVE.unlocked; save(); rer(); };
   let armed = false; const rs = $('#pReset', c);
   rs.onclick = () => { if (!armed) { armed = true; rs.textContent = 'Sicuro? Tocca ancora'; return; } SAVE = defaults(); save(); applyCase(); m.remove(); screenMap(); };
