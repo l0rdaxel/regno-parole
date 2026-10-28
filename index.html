@@ -581,7 +581,23 @@ const RETRY = ['Quasi! Riprova', 'Ci sei quasi!', 'Riprova, ce la fai!', 'Ancora
 'use strict';
 /* ===== AUDIO: musica generata (morbida, con riverbero), effetti, voce ===== */
 const Aud = (() => {
-  let ctx = null, master, mus, sfx, ana = null, timer = null;
+  let ctx = null, master, mus, sfx, ana = null, timer = null, fbus = null;
+  const files = { names: { map: 'musica-mappa.mp3', play: 'musica-gioco.mp3' }, ok: { map: false, play: false }, el: null, cur: null, mode: false };
+  function probeFiles() {
+    if (location.protocol === 'file:' || !window.fetch) return;
+    ['map', 'play'].forEach(k => fetch(files.names[k], { method: 'HEAD', cache: 'no-store' }).then(r => { files.ok[k] = !!r.ok; }).catch(() => { }));
+  }
+  const fileFor = m => files.ok[m] ? m : (files.ok.map ? 'map' : (files.ok.play ? 'play' : null));
+  function playFile() {
+    const k = fileFor(st.mood); if (!k || !ctx) return false;
+    if (!files.el) {
+      const a = new Audio(); a.loop = true; a.preload = 'auto'; files.el = a;
+      try { const src = ctx.createMediaElementSource(a); const g = ctx.createGain(); g.gain.value = 0.6; src.connect(g); g.connect(fbus); } catch (e) { }
+    }
+    if (files.cur !== k) { files.el.src = files.names[k]; files.cur = k; }
+    const pr = files.el.play(); if (pr && pr.catch) pr.catch(() => { });
+    return true;
+  }
   const st = { music: true, sfx: true, mood: 'map', key: 0, bar: 0, step: 0, next: 0, A: null, B: null, running: false, duck: 1 };
   const SCALE = [0, 2, 4, 7, 9];
   const CHORDS = [[0, 4, 7], [5, 9, 0], [9, 0, 4], [7, 11, 2]];
@@ -605,6 +621,7 @@ const Aud = (() => {
       const conv = ctx.createConvolver(); conv.buffer = makeIR(2.8, 2.6);
       const wet = ctx.createGain(); wet.gain.value = 0.9; conv.connect(wet); wet.connect(master);
       mus = ctx.createGain(); mus.gain.value = st.music ? st.duck : 0; mus.connect(master);
+      fbus = ctx.createGain(); fbus.gain.value = st.music ? st.duck : 0; fbus.connect(master);
       const ms = ctx.createGain(); ms.gain.value = 0.7; mus.connect(ms); ms.connect(conv);
       sfx = ctx.createGain(); sfx.gain.value = st.sfx ? 1 : 0; sfx.connect(master);
       const ss = ctx.createGain(); ss.gain.value = 0.22; sfx.connect(ss); ss.connect(conv);
@@ -690,18 +707,21 @@ const Aud = (() => {
   }
   function start() {
     init();
-    if (!ctx || st.running) return;
+    if (!ctx) return;
+    if (fileFor('map') || fileFor('play')) { files.mode = true; playFile(); return; }
+    if (st.running) return;
     st.running = true; st.next = ctx.currentTime + 0.1; st.step = 0;
     timer = setInterval(tick, 60);
   }
-  function stop() { st.running = false; if (timer) { clearInterval(timer); timer = null; } }
+  function stop() { st.running = false; if (timer) { clearInterval(timer); timer = null; } if (files.el) files.el.pause(); }
 
   const api = {
     init, start, stop,
-    setMood(m, key) { st.mood = m; if (key != null) st.key = key; },
-    setMusic(on) { st.music = on; if (mus) mus.gain.setTargetAtTime(on ? st.duck : 0, ctx.currentTime, 0.05); },
+    setMood(m, key) { st.mood = m; if (key != null) st.key = key; if (files.mode && st.music) playFile(); },
+    setMusic(on) { st.music = on; if (mus) mus.gain.setTargetAtTime(on ? st.duck : 0, ctx.currentTime, 0.05); if (fbus) fbus.gain.setTargetAtTime(on ? st.duck : 0, ctx.currentTime, 0.05); },
+    usingFiles() { return files.mode; },
     setSfx(on) { st.sfx = on; if (sfx) sfx.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.02); },
-    duck(on) { st.duck = on ? 0.3 : 1; if (mus && st.music) mus.gain.setTargetAtTime(st.duck, ctx.currentTime, 0.1); },
+    duck(on) { st.duck = on ? 0.3 : 1; if (mus && st.music) mus.gain.setTargetAtTime(st.duck, ctx.currentTime, 0.1); if (fbus && st.music) fbus.gain.setTargetAtTime(st.duck, ctx.currentTime, 0.1); },
     visible(v) { if (!ctx) return; if (v) { ctx.resume(); } else { ctx.suspend(); } },
     peak() { if (!ana) return 0; const d = new Float32Array(ana.fftSize); ana.getFloatTimeDomainData(d); let p = 0; for (const x of d) p = Math.max(p, Math.abs(x)); return p; },
     pop(n) { if (!ctx) return; const t = ctx.currentTime; tone(mtof(72 + (n || 0) * 2), t, 0.16, { vol: 0.16, a: 0.006, slide: mtof(74 + (n || 0) * 2) }); },
@@ -712,6 +732,7 @@ const Aud = (() => {
     win() { if (!ctx) return; const t = ctx.currentTime; [[67, 0], [72, 0.16], [76, 0.32], [79, 0.48], [84, 0.7], [79, 0.95], [84, 1.15]].forEach(([n, d]) => { bell(mtof(n), t + d, 1.1, 0.16); tone(mtof(n - 12), t + d, 0.6, { vol: 0.05, a: 0.02 }); }); },
     sticker() { if (!ctx) return; const t = ctx.currentTime; for (let i = 0; i < 8; i++) bell(mtof(76 + i * 2 + (i > 4 ? 1 : 0)), t + i * 0.07, 0.7, 0.1); }
   };
+  probeFiles();
   return api;
 })();
 
